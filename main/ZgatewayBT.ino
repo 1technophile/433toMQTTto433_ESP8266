@@ -747,6 +747,12 @@ void BLEconnect() {
           BLEclient.publishData();
           break;
         }
+        case SWITCHBOT: {
+          switchbot_connect BLEclient(addr);
+          BLEclient.processActions(BLEactions);
+          BLEclient.publishData();
+          break;
+        }
         case GENERIC: {
           GENERIC_connect BLEclient(addr);
           BLEclient.processActions(BLEactions);
@@ -1270,6 +1276,14 @@ JsonObject& process_bledata(JsonObject& BLEdata) {
           if (device->sensorModel == -1)
             createOrUpdateDevice(mac, device_flags_init, EDDYSTONE_TLM);
           return process_eddystonetlm(BLEdata);
+        }
+        Log.trace(F("Is it a switchbot?" CR));
+        if (strstr(service_datauuid, "cba20d00") != NULL) {
+          Log.trace(F("switchbot" CR));
+          BLEdata.set("model", "SWITCHBOT");
+          if (device->sensorModel == -1)
+            createOrUpdateDevice(mac, device_flags_connect, SWITCHBOT);
+          return BLEdata;
         }
       }
     } else {

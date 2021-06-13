@@ -253,5 +253,55 @@ void DT24_connect::publishData() {
   }
 }
 
+/*-----------------------SWITCHBOT EXPERIMENTAL-----------------------*/
+/* This is experimental and should be used for testing only.
+ * At this time no testing has been done so this is only an example of extendability.
+ */
+void switchbot_connect::notifyCB(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+  if (!ProcessLock) {
+    Log.trace(F("Callback from %s characteristic" CR), pChar->getUUID().toString().c_str());
+    if (pData[0] == 1) {
+      Log.trace(F("Device identified creating BLE buffer" CR));
+      JsonObject& BLEdata = getBTJsonObject();
+      String mac_adress = m_pClient->getPeerAddress().toString().c_str();
+      mac_adress.toUpperCase();
+
+      BLEdata.set("model", "switchbot");
+      BLEdata.set("id", (char*)mac_adress.c_str());
+      Log.trace(F("Device identified in CB: %s" CR), (char*)mac_adress.c_str());
+      BLEdata.set("batt", (int)pData[1]);
+      BLEdata.set("version", (float)pData[2] / 10.0);
+      BLEdata.set("num_timers", (int)pData[8]);
+      BLEdata.set("mode", (pData[9] & 0x08) ? "switch" : "press");
+      BLEdata.set("inverted", (bool)(pData[9] & 0x01));
+      BLEdata.set("hold_secs", (int)pData[10]);
+
+      pubBT(BLEdata);
+    } else {
+      Log.notice(F("Device not identified" CR));
+    }
+  } else {
+    Log.trace(F("Callback process canceled by processLock" CR));
+  }
+  xTaskNotifyGive(m_taskHandle);
+}
+
+void switchbot_connect::publishData() {
+  NimBLEUUID serviceUUID("cba20d00-224d-11e6-9fb8-0002a5d5c51b");
+  NimBLEUUID charUUID("cba20003-224d-11e6-9fb8-0002a5d5c51b");
+  NimBLERemoteCharacteristic* pChar = getCharacteristic(serviceUUID, charUUID);
+
+  if (pChar && pChar->canNotify()) {
+    Log.trace(F("Registering notification" CR));
+    pChar->subscribe(true, std::bind(&switchbot_connect::notifyCB, this,
+                                     std::placeholders::_1, std::placeholders::_2,
+                                     std::placeholders::_3, std::placeholders::_4));
+    m_taskHandle = xTaskGetCurrentTaskHandle();
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BLE_CNCT_TIMEOUT));
+  } else {
+    Log.notice(F("Failed registering notification" CR));
+  }
+}
+
 #  endif //ZgatewayBT
 #endif //ESP32
