@@ -70,6 +70,7 @@ int minimumRssi = 0;
 /*-------------------RF topics & parameters----------------------*/
 //433Mhz MQTT Subjects and keys
 #define subjectMQTTtoRF    "/commands/MQTTto433"
+#define subjectMQTTtoRFset "/commands/MQTTto433/config"
 #define subjectRFtoMQTT    "/433toMQTT"
 #define subjectGTWRFtoMQTT "/433toMQTT"
 #define RFprotocolKey      "433_" // protocol will be defined if a subject contains RFprotocolKey followed by a value of 1 digit
