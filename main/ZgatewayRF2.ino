@@ -209,7 +209,7 @@ void MQTTtoRF2(char* topicOri, char* datacallback) {
       valuePERIOD = 272;
     NewRemoteReceiver::disable();
     Log.trace(F("Creating transmitter" CR));
-    NewRemoteTransmitter transmitter(valueCODE, RF_EMITTER_GPIO, valuePERIOD);
+    NewRemoteTransmitter transmitter(valueCODE, RF_EMITTER_GPIO, valuePERIOD, RF2_EMITTER_REPEAT);
     Log.trace(F("Sending data" CR));
     if (valueGROUP) {
       if (isDimCommand) {
@@ -286,7 +286,7 @@ void MQTTtoRF2(char* topicOri, JsonObject& RF2data) { // json object decoding
         if (valuePERIOD == 0)
           valuePERIOD = 272;
         NewRemoteReceiver::disable();
-        NewRemoteTransmitter transmitter(valueCODE, RF_EMITTER_GPIO, valuePERIOD);
+        NewRemoteTransmitter transmitter(valueCODE, RF_EMITTER_GPIO, valuePERIOD, RF2_EMITTER_REPEAT);
         Log.trace(F("Sending" CR));
         if (valueGROUP) {
           if (isDimCommand) {
