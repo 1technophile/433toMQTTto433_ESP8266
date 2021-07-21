@@ -118,6 +118,8 @@ void PublishDeviceData(JsonObject& BLEdata, bool processBLEData = true);
 
 #  ifdef ESP32
 static TaskHandle_t xCoreTaskHandle;
+static TaskHandle_t xProcBLETaskHandle;
+static QueueHandle_t procBLEQueue;
 
 atomic_int forceBTScan;
 
@@ -612,99 +614,18 @@ void EddystoneTLMDiscovery(const char* mac, const char* sensorModel) {}
 //core on which the BLE detection task will run
 static int taskCore = 0;
 
+std::string convertServiceData(std::string deviceServiceData) {
+  int serviceDataLength = (int)deviceServiceData.length();
+  char spr[2 * serviceDataLength + 1];
+  for (int i = 0; i < serviceDataLength; i++) sprintf(spr + 2 * i, "%.2x", (unsigned char)deviceServiceData[i]);
+  spr[2 * serviceDataLength] = 0;
+  Log.trace("Converted service data (%d) to %s" CR, serviceDataLength, spr);
+  return spr;
+}
+
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
-  std::string convertServiceData(std::string deviceServiceData) {
-    int serviceDataLength = (int)deviceServiceData.length();
-    char spr[2 * serviceDataLength + 1];
-    for (int i = 0; i < serviceDataLength; i++) sprintf(spr + 2 * i, "%.2x", (unsigned char)deviceServiceData[i]);
-    spr[2 * serviceDataLength] = 0;
-    Log.trace("Converted service data (%d) to %s" CR, serviceDataLength, spr);
-    return spr;
-  }
-
   void onResult(BLEAdvertisedDevice* advertisedDevice) {
-    if (!ProcessLock) {
-      Log.trace(F("Creating BLE buffer" CR));
-      JsonObject& BLEdata = getBTJsonObject();
-      String mac_adress = advertisedDevice->getAddress().toString().c_str();
-      mac_adress.toUpperCase();
-      BLEdata.set("id", (char*)mac_adress.c_str());
-      Log.notice(F("Device detected: %s" CR), (char*)mac_adress.c_str());
-      BLEdevice* device = getDeviceByMac(BLEdata["id"].as<const char*>());
-
-#    if BLE_FILTER_CONNECTABLE
-      if (device->connect) {
-        Log.notice(F("Filtered connectable device" CR));
-        return;
-      }
-#    endif
-
-      if ((!oneWhite || isWhite(device)) && !isBlack(device)) { //if not black listed mac we go AND if we have no white mac or this mac is  white we go out
-        if (advertisedDevice->haveName())
-          BLEdata.set("name", (char*)advertisedDevice->getName().c_str());
-        if (advertisedDevice->haveManufacturerData()) {
-          char* manufacturerdata = BLEUtils::buildHexData(NULL, (uint8_t*)advertisedDevice->getManufacturerData().data(), advertisedDevice->getManufacturerData().length());
-          Log.trace(F("Manufacturer Data: %s" CR), manufacturerdata);
-          BLEdata.set("manufacturerdata", manufacturerdata);
-          free(manufacturerdata);
-        }
-        if (advertisedDevice->haveRSSI())
-          BLEdata.set("rssi", (int)advertisedDevice->getRSSI());
-        if (advertisedDevice->haveTXPower())
-          BLEdata.set("txpower", (int8_t)advertisedDevice->getTXPower());
-        if (advertisedDevice->haveRSSI() && !publishOnlySensors && hassPresence) {
-          hass_presence(BLEdata); // this device has an rssi and we don't want only sensors so in consequence we can use it for home assistant room presence component
-        }
-        if (advertisedDevice->haveServiceData()) {
-          int serviceDataCount = advertisedDevice->getServiceDataCount();
-          Log.trace(F("Get services data number: %d" CR), serviceDataCount);
-          for (int j = 0; j < serviceDataCount; j++) {
-            std::string service_data = convertServiceData(advertisedDevice->getServiceData(j));
-            Log.trace(F("Service data: %s" CR), service_data.c_str());
-            BLEdata.set("servicedata", (char*)service_data.c_str());
-            std::string serviceDatauuid = advertisedDevice->getServiceDataUUID(j).toString();
-            Log.trace(F("Service data UUID: %s" CR), (char*)serviceDatauuid.c_str());
-            BLEdata.set("servicedatauuid", (char*)serviceDatauuid.c_str());
-            process_bledata(BLEdata); // this will force to resolve all the service data
-          }
-
-          if (serviceDataCount > 1) {
-            BLEdata.remove("servicedata");
-            BLEdata.remove("servicedatauuid");
-
-            int msglen = BLEdata.measureLength() + 1;
-            char jsonmsg[msglen];
-            char jsonmsgb[msglen];
-            BLEdata.printTo(jsonmsgb, sizeof(jsonmsgb));
-            for (int j = 0; j < serviceDataCount; j++) {
-              strcpy(jsonmsg, jsonmsgb); // the parse _destroys_ the message buffer
-              JsonObject& BLEdataLocal = getBTJsonObject(jsonmsg, j == 0); // note, that first time we will get here the BLEdata itself; haPresence for the first msg
-              if (!BLEdataLocal.containsKey("id")) { // would crash without id
-                Log.trace("Json parsing error for %s" CR, jsonmsgb);
-                break;
-              }
-              std::string service_data = convertServiceData(advertisedDevice->getServiceData(j));
-              std::string serviceDatauuid = advertisedDevice->getServiceDataUUID(j).toString();
-
-              int last = atomic_load_explicit(&jsonBTBufferQueueLast, ::memory_order_seq_cst) % BTQueueSize;
-              int size1 = jsonBTBufferQueue[last].buffer.size();
-              BLEdataLocal.set("servicedata", (char*)service_data.c_str());
-              int size2 = jsonBTBufferQueue[last].buffer.size();
-              BLEdataLocal.set("servicedatauuid", (char*)serviceDatauuid.c_str());
-              int size3 = jsonBTBufferQueue[last].buffer.size();
-              Log.trace("Buffersize for %d : %d -> %d -> %d" CR, j, size1, size2, size3);
-              PublishDeviceData(BLEdataLocal);
-            }
-          } else {
-            PublishDeviceData(BLEdata, false); // easy case
-          }
-        } else {
-          PublishDeviceData(BLEdata); // PublishDeviceData has its own logic whether it needs to publish the json or not
-        }
-      } else {
-        Log.trace(F("Filtered mac device" CR));
-      }
-    }
+    xQueueSend(procBLEQueue, (void*)&advertisedDevice, 0);
   }
 };
 
@@ -790,6 +711,96 @@ void startProcessing() {
   vTaskResume(xCoreTaskHandle);
 }
 
+void processBLETask(void* pvParameters) {
+  NimBLEAdvertisedDevice* advertisedDevice = nullptr;
+  while (1) {
+    if (xQueueReceive(procBLEQueue, &(advertisedDevice), portMAX_DELAY) == pdPASS) {
+      if (!ProcessLock) {
+        Log.trace(F("Creating BLE buffer" CR));
+        JsonObject& BLEdata = getBTJsonObject();
+        String mac_adress = advertisedDevice->getAddress().toString().c_str();
+        mac_adress.toUpperCase();
+        BLEdata.set("id", (char*)mac_adress.c_str());
+        Log.notice(F("Device detected: %s" CR), (char*)mac_adress.c_str());
+        BLEdevice* device = getDeviceByMac(BLEdata["id"].as<const char*>());
+
+#    if BLE_FILTER_CONNECTABLE
+        if (device->connect) {
+          Log.notice(F("Filtered connectable device" CR));
+          return;
+        }
+#    endif
+
+        if ((!oneWhite || isWhite(device)) && !isBlack(device)) { //if not black listed mac we go AND if we have no white mac or this mac is  white we go out
+          if (advertisedDevice->haveName())
+            BLEdata.set("name", (char*)advertisedDevice->getName().c_str());
+          if (advertisedDevice->haveManufacturerData()) {
+            char* manufacturerdata = BLEUtils::buildHexData(NULL, (uint8_t*)advertisedDevice->getManufacturerData().data(), advertisedDevice->getManufacturerData().length());
+            Log.trace(F("Manufacturer Data: %s" CR), manufacturerdata);
+            BLEdata.set("manufacturerdata", manufacturerdata);
+            free(manufacturerdata);
+          }
+          if (advertisedDevice->haveRSSI())
+            BLEdata.set("rssi", (int)advertisedDevice->getRSSI());
+          if (advertisedDevice->haveTXPower())
+            BLEdata.set("txpower", (int8_t)advertisedDevice->getTXPower());
+          if (advertisedDevice->haveRSSI() && !publishOnlySensors && hassPresence) {
+            hass_presence(BLEdata); // this device has an rssi and we don't want only sensors so in consequence we can use it for home assistant room presence component
+          }
+          if (advertisedDevice->haveServiceData()) {
+            int serviceDataCount = advertisedDevice->getServiceDataCount();
+            Log.trace(F("Get services data number: %d" CR), serviceDataCount);
+            for (int j = 0; j < serviceDataCount; j++) {
+              std::string service_data = convertServiceData(advertisedDevice->getServiceData(j));
+              Log.trace(F("Service data: %s" CR), service_data.c_str());
+              BLEdata.set("servicedata", (char*)service_data.c_str());
+              std::string serviceDatauuid = advertisedDevice->getServiceDataUUID(j).toString();
+              Log.trace(F("Service data UUID: %s" CR), (char*)serviceDatauuid.c_str());
+              BLEdata.set("servicedatauuid", (char*)serviceDatauuid.c_str());
+              process_bledata(BLEdata); // this will force to resolve all the service data
+            }
+
+            if (serviceDataCount > 1) {
+              BLEdata.remove("servicedata");
+              BLEdata.remove("servicedatauuid");
+
+              int msglen = BLEdata.measureLength() + 1;
+              char jsonmsg[msglen];
+              char jsonmsgb[msglen];
+              BLEdata.printTo(jsonmsgb, sizeof(jsonmsgb));
+              for (int j = 0; j < serviceDataCount; j++) {
+                strcpy(jsonmsg, jsonmsgb); // the parse _destroys_ the message buffer
+                JsonObject& BLEdataLocal = getBTJsonObject(jsonmsg, j == 0); // note, that first time we will get here the BLEdata itself; haPresence for the first msg
+                if (!BLEdataLocal.containsKey("id")) { // would crash without id
+                  Log.trace("Json parsing error for %s" CR, jsonmsgb);
+                  break;
+                }
+                std::string service_data = convertServiceData(advertisedDevice->getServiceData(j));
+                std::string serviceDatauuid = advertisedDevice->getServiceDataUUID(j).toString();
+
+                int last = atomic_load_explicit(&jsonBTBufferQueueLast, ::memory_order_seq_cst) % BTQueueSize;
+                int size1 = jsonBTBufferQueue[last].buffer.size();
+                BLEdataLocal.set("servicedata", (char*)service_data.c_str());
+                int size2 = jsonBTBufferQueue[last].buffer.size();
+                BLEdataLocal.set("servicedatauuid", (char*)serviceDatauuid.c_str());
+                int size3 = jsonBTBufferQueue[last].buffer.size();
+                Log.trace("Buffersize for %d : %d -> %d -> %d" CR, j, size1, size2, size3);
+                PublishDeviceData(BLEdataLocal);
+              }
+            } else {
+              PublishDeviceData(BLEdata, false); // easy case
+            }
+          } else {
+            PublishDeviceData(BLEdata); // PublishDeviceData has its own logic whether it needs to publish the json or not
+          }
+        } else {
+          Log.trace(F("Filtered mac device" CR));
+        }
+      }
+    }
+  }
+}
+
 void coreTask(void* pvParameters) {
   while (true) {
     if (!ProcessLock) {
@@ -801,11 +812,22 @@ void coreTask(void* pvParameters) {
       if (client.state() != 0) {
         Log.warning(F("MQTT client disconnected no BLE scan" CR));
       } else if (!ProcessLock) {
+        BLEDevice::setScanDuplicateCacheSize(BLEScanDuplicateCacheSize);
+        BLEDevice::init("");
         BLEscan();
+
+        // Wait until the queue is proccessed before continuing.
+        while (uxQueueMessagesWaiting(procBLEQueue)) {
+          yield();
+        }
         // Launching a connect every BLEscanBeforeConnect
         if ((!(scanCount % BLEscanBeforeConnect) || scanCount == 1) && bleConnect)
           BLEconnect();
+
         dumpDevices();
+        BLEDevice::deinit();
+        Log.trace(F("Process BLE Task HWM: %u" CR), uxTaskGetStackHighWaterMark(xProcBLETaskHandle));
+        Log.trace(F("Core BLE Task HWM: %u" CR), uxTaskGetStackHighWaterMark(NULL));
       }
       if (lowpowermode) {
         lowPowerESP32();
@@ -884,19 +906,27 @@ void setupBT() {
 
   semaphoreCreateOrUpdateDevice = xSemaphoreCreateBinary();
   xSemaphoreGive(semaphoreCreateOrUpdateDevice);
-
-  BLEDevice::setScanDuplicateCacheSize(BLEScanDuplicateCacheSize);
-  BLEDevice::init("");
+  procBLEQueue = xQueueCreate(32, sizeof(NimBLEAdvertisedDevice*));
 
   // we setup a task with priority one to avoid conflict with other gateways
   xTaskCreatePinnedToCore(
       coreTask, /* Function to implement the task */
       "coreTask", /* Name of the task */
-      10000, /* Stack size in words */
+      4096, /* Stack size in words */
       NULL, /* Task input parameter */
       1, /* Priority of the task */
       &xCoreTaskHandle, /* Task handle. */
       taskCore); /* Core where the task should run */
+
+  // Create a task on core 1 to process the BLE data so we don't use wifi/ble core time
+  xTaskCreatePinnedToCore(
+      processBLETask, /* Function to implement the task */
+      "procBLE", /* Name of the task */
+      4096, /* Stack size in words */
+      NULL, /* Task input parameter */
+      2, /* Priority of the task */
+      &xProcBLETaskHandle, /* Task handle. */
+      1); /* Core where the task should run */
   Log.trace(F("ZgatewayBT multicore ESP32 setup done " CR));
 }
 
@@ -1363,7 +1393,7 @@ JsonObject& process_bledata(JsonObject& BLEdata) {
         createOrUpdateDevice(mac, device_flags_init, WS02);
       return process_ws02(BLEdata);
     }
-    Log.trace(F("Is it an iBeacon? %u" CR), strlen(manufacturerdata));
+    Log.trace(F("Is it an iBeacon?" CR));
     if (strlen(manufacturerdata) == 50 && strncmp(&manufacturerdata[0], "4c00", 4) == NULL) {
       Log.trace(F("iBeacon data reading" CR));
       BLEdata.set("model", "IBEACON");
