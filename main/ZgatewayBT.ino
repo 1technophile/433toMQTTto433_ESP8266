@@ -577,6 +577,21 @@ void EddystoneTLMDiscovery(const char* mac, const char* sensorModel) {
   createDiscoveryFromList(mac, EddystoneTLMsensor, EddystoneTLMparametersCount, "EddystoneTLM", "SensorBlue", sensorModel);
 }
 
+void TPMSDiscovery(const char* mac, const char* sensorModel) {
+#    define TPMSparametersCount 5
+  Log.trace(F("TPMSDiscovery" CR));
+  const char* TPMSsensor[TPMSparametersCount][8] = {
+      {"sensor", "TPMS-batt", mac, "battery", jsonBatt, "", "", "%"},
+      {"sensor", "TPMS-temp", mac, "temperature", jsonTempc, "", "", "°C"},
+      {"sensor", "TPMS-pres", mac, "pressure", jsonPres, "", "", "kPa"},
+      {"sensor", "TPMS-count", mac, "", jsonCount, "", "", ""},
+      {"sensor", "TPMS-alarm", mac, "", jsonAlarm, "", "", ""}
+      //component type,name,availability topic,device class,value template,payload on, payload off, unit of measurement
+  };
+
+  createDiscoveryFromList(mac, TPMSsensor, TPMSparametersCount, "TPMS", "TPMS", sensorModel);
+}
+
 #  else
 void MiFloraDiscovery(const char* mac, const char* sensorModel) {}
 void VegTrugDiscovery(const char* mac, const char* sensorModel) {}
@@ -601,6 +616,7 @@ void INodeEMDiscovery(const char* mac, const char* sensorModel) {}
 void WS02Discovery(const char* mac, const char* sensorModel) {}
 void DT24Discovery(const char* mac, const char* sensorModel) {}
 void EddystoneTLMDiscovery(const char* mac, const char* sensorModel) {}
+void TPMSDiscovery(const char* mac, const char* sensorModel) {}
 #  endif
 
 #  ifdef ESP32
@@ -1084,6 +1100,7 @@ void launchBTDiscovery() {
       if (p->sensorModel == MHO_C401) MHO_C401Discovery(macWOdots.c_str(), "MHO_C401");
       if (p->sensorModel == INODE_EM) INodeEMDiscovery(macWOdots.c_str(), "INODE_EM");
       if (p->sensorModel == DT24) DT24Discovery(macWOdots.c_str(), "DT24-BLE");
+      if (p->sensorModel == TPMS) TPMSDiscovery(macWOdots.c_str(), "TPMS");
       p->isDisc = true; // we don't need the semaphore and all the search magic via createOrUpdateDevice
     } else {
       if (!isDiscovered(p)) {
@@ -1346,6 +1363,14 @@ JsonObject& process_bledata(JsonObject& BLEdata) {
         if (device->sensorModel == -1)
           createOrUpdateDevice(mac, device_flags_connect, DT24);
         return BLEdata;
+      }
+      Log.trace(F("Is it a TPMS? %u" CR), strlen(manufacturerdata));
+      if (strlen(manufacturerdata) == 36 && strstr(name, "TPMS") != NULL) {
+        Log.trace(F("TPMS data reading" CR));
+        BLEdata.set("model", "TPMS");
+        if (device->sensorModel == -1)
+          createOrUpdateDevice(mac, device_flags_init, TPMS);
+        return process_tpms(BLEdata);
       }
     }
     Log.trace(F("Is it a iNode Energy Meter?" CR));
@@ -1760,6 +1785,28 @@ JsonObject& process_ibeacon(JsonObject& BLEdata) {
   BLEdata.set("Major:", (uint16_t)value_from_hex_data(manufacturerdata, 40, 4, false, false));
   BLEdata.set("Minor:", (uint16_t)value_from_hex_data(manufacturerdata, 44, 4, false, false));
   BLEdata.set("Power:", (int8_t)value_from_hex_data(manufacturerdata, 48, 4, false));
+}
+
+JsonObject& process_tpms(JsonObject& BLEdata) {
+  const char* manufacturerdata = BLEdata["manufacturerdata"].as<const char*>();
+
+  int id = (int)value_from_hex_data(manufacturerdata, 5, 1, false);
+  double pressure = (double)value_from_hex_data(manufacturerdata, 16, 8, true) / 1000;
+  double temperature = (double)value_from_hex_data(manufacturerdata, 24, 8, true) / 100;
+  int battery = (int)value_from_hex_data(manufacturerdata, 32, 2, true);
+  int alarm = (int)value_from_hex_data(manufacturerdata, 35, 1, false);
+
+  BLEdata.set("count", (int)id);
+  BLEdata.set("pres", (double)pressure);
+  BLEdata.set("tempc", (double)temperature);
+  BLEdata.set("tempf", (double)convertTemp_CtoF(temperature));
+  BLEdata.set("batt", (int)battery);
+  if (alarm == 1)
+    BLEdata.set("alarm", true);
+  if (alarm == 0)
+    BLEdata.set("alarm", false);
+
+  return BLEdata;
 }
 
 void hass_presence(JsonObject& HomePresence) {

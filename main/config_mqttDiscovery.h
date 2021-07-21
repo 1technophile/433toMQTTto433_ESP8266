@@ -81,6 +81,7 @@ extern void createDiscovery(const char* sensor_type,
 #  define jsonOpen     "{{ value_json.open }}"
 #  define jsonTime     "{{ value_json.time }}"
 #  define jsonCount    "{{ value_json.count }}"
+#  define jsonAlarm    "{{ value_json.alarm }}"
 #else // Home assistant autodiscovery value key definition
 #  define jsonBatt     "{{ value_json.batt | is_defined }}"
 #  define jsonLux      "{{ value_json.lux | is_defined }}"
@@ -115,6 +116,7 @@ extern void createDiscovery(const char* sensor_type,
 #  define jsonOpen     "{{ value_json.open | is_defined }}"
 #  define jsonTime     "{{ value_json.time | is_defined }}"
 #  define jsonCount    "{{ value_json.count | is_defined }}"
+#  define jsonAlarm    "{{ value_json.alarm | is_defined }}"
 #endif
 
 #endif
